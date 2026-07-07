@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 
 from argparse import ArgumentParser
-from os import path
+from os import path, walk, lstat
 from pathlib import Path
 from re import compile, match
+from stat import S_ISREG
 from tqdm import tqdm
 from subprocess import Popen, PIPE
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR   = SCRIPT_DIR / "data"
 
 
 def get_args():
@@ -46,23 +50,22 @@ class Firmwalker():
 
     def get_full_file_listing(self, directory):
         directory = path.abspath(directory)
-        listing = list(Path(directory).iterdir())
 
         returnable = []
-        for item in listing:
-            tmp_item = path.join(directory, item)
-            if not item.is_dir():
-                returnable.append(tmp_item)
-            else:
-                dir_items = self.get_full_file_listing(item)
-                for di in dir_items:
-                    returnable.append(path.join(directory, di))
+        for root, dirs, files in walk(directory, followlinks=False):
+            for name in files:
+                full = path.join(root, name)
+                try:
+                    if S_ISREG(lstat(full).st_mode):
+                        returnable.append(full)
+                except OSError:
+                    continue
 
         return returnable
 
 
     def get_data_files(self):
-        tmp_dfd = self.get_full_file_listing("./data/")
+        tmp_dfd = self.get_full_file_listing(str(DATA_DIR))
         for f in tmp_dfd:
             with open(f, 'r') as fptr:
                 tmp_content = fptr.read()
@@ -78,34 +81,44 @@ class Firmwalker():
                 if st.startswith("*"): st = f".{st}"
                 if st.endswith("*")  : st = f"{st}."
                 search_term = compile(st)
-                for i in list(
-                    filter(
-                        search_term.match,
-                        tmp_filelisting
-                    )
-                ):
+                matches = [
+                    self.filelisting[idx]
+                    for idx, name in enumerate(tmp_filelisting)
+                    if search_term.match(name)
+                ]
+                if matches:
                     if d not in self.located: self.located[d] = {}
-                    self.located[d][st] = i
+                    self.located[d][st] = matches
 
             else:
-                if st in tmp_filelisting:
+                matches = [
+                    self.filelisting[idx]
+                    for idx, name in enumerate(tmp_filelisting)
+                    if name == st
+                ]
+                if matches:
                     if d not in self.located: self.located[d] = {}
-                    self.located[d][st] = self.filelisting[
-                        tmp_filelisting.index(st)
-                    ]
+                    self.located[d][st] = matches
         return
 
 
     def searching_patterns(self, d, tmp_filelisting):
-        for st in self.dfd[d]:
+        patterns = [
+            (str(st), bytes(str(st), "utf-8"))
+            for st in self.dfd[d] if str(st).strip()
+        ]
+        for st, _ in patterns:
             op = f"\tSearching for: {st}\n"
             self.store_results(op)
-            for i in tqdm(range(len(self.filelisting))):
-                file = self.filelisting[i]
-                st = str(st)
+
+        for file in tqdm(self.filelisting):
+            try:
                 with open(file, 'rb') as fptr:
                     content = fptr.read()
-                if bytes(st, "utf-8") in content:
+            except OSError:
+                continue
+            for st, st_bytes in patterns:
+                if st_bytes in content:
                     if d not in self.located: self.located[d] = {}
                     if st not in self.located[d]: self.located[d][st] = []
                     self.located[d][st].append(file)
@@ -130,7 +143,7 @@ class Firmwalker():
         return
 
     def grep(self, d, tmp_filelisting):
-        cmd = ["/bin/bash", f"./data/{d}", self.directory]
+        cmd = ["/bin/bash", str(DATA_DIR / d), self.directory]
         process = Popen(cmd, stdout=PIPE, stderr=PIPE)
         out, err = process.communicate()
         out = out.decode("utf-8")
@@ -160,10 +173,12 @@ class Firmwalker():
 
 
     def write_results(self):
-        if path.isfile(self.output_file):
-            self.output_file = f"_{self.output_file}"
-        with open(self.output_file, 'a') as fptr:
+        while path.isfile(self.output_file):
+            head, tail = path.split(self.output_file)
+            self.output_file = path.join(head, f"_{tail}")
+        with open(self.output_file, 'w') as fptr:
             fptr.write(self.output)
+        print(f"[+] Results written to {self.output_file}")
 
 def main():
     args = get_args()
